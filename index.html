@@ -71,6 +71,7 @@ progress{width:100%}
     <h2><b>E</b>Escena grande (coche, interior)</h2>
     <label>Focal (fracción del ancho) <input type="number" id="sceneF" value="0.8" step="0.05" min="0.4" max="2"></label>
     <label>Longitud de cada paso (m) <input type="number" id="sceneStep" value="0.5" step="0.1" min="0.05"></label>
+    <label>Puntos seguidos por fotograma clave <input type="number" id="sceneN" value="200" step="20" min="20" max="1000"></label>
     <div class="row"><button id="btnScene">Iniciar escaneo</button><button id="btnScenePly" class="sec" disabled>Exportar nube (PLY)</button></div>
     <p class="hint" id="sceneInfo">Activa cámara y sensores. Camina despacio apuntando siempre al mismo lado; la escala depende de «Longitud de cada paso», así que ajústala con una medida real.</p>
   </div>
@@ -1160,7 +1161,7 @@ $('btnPng').onclick = async () => download(await texBlob(), 'scan_texture.png');
 // seguidos con Lucas-Kanade piramidal entre fotogramas clave; la dirección de cada paso sale de la
 // restricción epipolar (lineal, con rotación conocida). Escala = «Longitud de cada paso» (dato del usuario).
 const isScene = () => $('scanMode').value === 'scene';
-const SC = { on: false, kfs: [], pts: [], good: [], f: 0.8 * 320, step: 0.5 };
+const SC = { on: false, kfs: [], pts: [], good: [], f: 0.8 * 320, step: 0.5, nFeat: 200 };
 const vAdd = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const vSub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const vScl = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
@@ -1312,7 +1313,7 @@ function addKeyframe(pairs, R, pyr, img) {
       }
     }
   }
-  SC.kfs.push({ c: c.slice(), R, pyr, img, feats: detectFeatures(pyr[0]) });
+  SC.kfs.push({ c: c.slice(), R, pyr, img, feats: detectFeatures(pyr[0], SC.nFeat) });
   sceneInfo();
 }
 function sceneStep() {
@@ -1365,6 +1366,7 @@ $('btnScene').onclick = () => {
   if (S.source !== 'cam') return status('Inicia la cámara primero.');
   if (!SENS.o) return status('Activa los sensores primero (orientación).');
   SC.f = (+$('sceneF').value || 0.8) * MW; SC.step = +$('sceneStep').value || 0.5;
+  SC.nFeat = Math.min(1000, Math.max(20, +$('sceneN').value | 0 || 200));
   SC.kfs = []; SC.pts = []; SC.good = []; SC.on = true;
   $('btnScene').textContent = 'Detener y ver nube'; sceneInfo();
 };
