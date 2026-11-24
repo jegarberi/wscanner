@@ -14,3 +14,15 @@ services:
     volumes:
       # Certificados persistentes. Pon aquí cert.pem y key.pem propios si los tienes.
       - ./certs:/etc/nginx/certs
+
+  uploads:
+    image: python:3.12-alpine
+    container_name: scanner3d-uploads
+    restart: unless-stopped
+    command: ["python", "/app/server.py"]
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - ./uploads:/app:ro
+      # Fotogramas subidos desde el celular (una carpeta por sesión)
+      - ./captures:/data

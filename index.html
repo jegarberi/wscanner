@@ -72,7 +72,8 @@ progress{width:100%}
     <label>Focal (fracción del ancho) <input type="number" id="sceneF" value="0.8" step="0.05" min="0.4" max="2"></label>
     <label>Paso fijo si no hay acelerómetro (m) <input type="number" id="sceneStep" value="0.5" step="0.1" min="0.05"></label>
     <label><input type="checkbox" id="sceneTri" checked> Mostrar triángulos sobre la cámara</label>
-    <label>Puntos seguidos por fotograma clave <input type="number" id="sceneN" value="200" step="20" min="20" max="1000"></label>
+    <label><input type="checkbox" id="sceneUp" checked> Subir fotogramas clave al servidor (resolución completa + poses)</label>
+    <label>Puntos seguidos por fotograma clave <input type="number" id="sceneN" value="500" step="50" min="20" max="3000"></label>
     <div class="row"><button id="btnScene">Iniciar escaneo</button><button id="btnScenePly" class="sec" disabled>Exportar nube (PLY)</button></div>
     <p class="hint" id="sceneInfo">Activa cámara y sensores. Camina despacio apuntando siempre al mismo lado; la escala depende de «Longitud de cada paso», así que ajústala con una medida real.</p>
   </div>
@@ -1347,7 +1348,7 @@ function colorAt(img, p) {
 }
 function sceneInfo() {
   const imu = IMU.n ? `${IMU.moving ? 'moviendo' : 'quieto'} · desde último fotograma ${Math.hypot(...vSub(IMU.p, SC.pKf)).toFixed(2)} m` : 'sin acelerómetro (paso fijo)';
-  $('sceneInfo').textContent = `Fotogramas clave: ${SC.kfs.length} · puntos 3D: ${SC.pts.length} · seguidos: ${SC.good.length} · ${SC.fps} fps · ${imu}`;
+  $('sceneInfo').textContent = `Fotogramas clave: ${SC.kfs.length} · puntos 3D: ${SC.pts.length} · seguidos: ${SC.good.length} · ${SC.fps} fps · ${imu}${SC.up ? ` · subidos ${SC.sent}/${SC.shots.length}${SC.failed ? ` (fallos ${SC.failed})` : ''}` : ''}`;
 }
 // Delaunay (Bowyer-Watson, O(n²), n ≤ 1000): devuelve triángulos [i,j,k] sobre P
 function delaunay(P) {
@@ -1404,7 +1405,28 @@ function addKeyframe(pairs, R, pyr, img) {
     }
   }
   SC.kfs.push({ c: c.slice(), R, pyr, img, feats: detectFeatures(pyr[0], SC.nFeat) });
+  if (SC.up) shotKeyframe(c, R);
   sceneInfo();
+}
+// Captura de fotogramas clave: JPEG a resolución completa, subido en orden a /upload/<sesión>/
+function upFile(name, blobP) {
+  SC.q = SC.q.then(() => blobP).then(b => fetch(`upload/${SC.session}/${name}`, { method: 'POST', body: b }))
+    .then(r => { if (r.ok) SC.sent++; else SC.failed++; }, () => { SC.failed++; }).then(sceneInfo);
+}
+function shotKeyframe(c, R) {
+  const v = sourceEl(); if (!v || !v.videoWidth) return;
+  const cv = document.createElement('canvas'); cv.width = v.videoWidth; cv.height = v.videoHeight;
+  cv.getContext('2d').drawImage(v, 0, 0);
+  const name = `f${String(SC.shots.length).padStart(4, '0')}.jpg`;
+  SC.shots.push({ name, c: c.slice(), R: R.map(r => Array.from(r)) });
+  upFile(name, new Promise(res => cv.toBlob(res, 'image/jpeg', 0.92)));
+}
+// manifest.json: poses de cada fotograma y distancia focal en píxeles de la resolución completa
+function uploadManifest() {
+  const v = sourceEl();
+  if (!SC.up || !SC.shots.length || !v || !v.videoWidth) return;
+  const m = { w: v.videoWidth, h: v.videoHeight, focal: SC.f * v.videoWidth / MW, frames: SC.shots };
+  upFile('manifest.json', Promise.resolve(new Blob([JSON.stringify(m)], { type: 'application/json' })));
 }
 function sceneStep() {
   if (!SC.on || S.source !== 'cam' || S.busy) return;
@@ -1467,14 +1489,15 @@ function exportPly() {
   download(new Blob([s], { type: 'text/plain' }), 'escena.ply');
 }
 $('btnScene').onclick = () => {
-  if (SC.on) { SC.on = false; $('btnScene').textContent = 'Iniciar escaneo'; buildCloud(); return; }
+  if (SC.on) { SC.on = false; $('btnScene').textContent = 'Iniciar escaneo'; uploadManifest(); buildCloud(); return; }
   if (S.source !== 'cam') return status('Inicia la cámara primero.');
   if (!SENS.o) return status('Activa los sensores primero (orientación).');
   SC.f = (+$('sceneF').value || 0.8) * MW; SC.step = +$('sceneStep').value || 0.5;
-  SC.nFeat = Math.min(1000, Math.max(20, +$('sceneN').value | 0 || 200));
+  SC.nFeat = Math.min(3000, Math.max(20, +$('sceneN').value | 0 || 500));
   SC.kfs = []; SC.pts = []; SC.good = []; SC.tris = []; SC.on = true;
   IMU.p = [0, 0, 0]; IMU.v = [0, 0, 0]; IMU.t = null; IMU.n = 0; IMU.R = null; SC.pKf = [0, 0, 0];
   SC.cnt = 0; SC.t0 = performance.now(); SC.fps = 0;
+  SC.up = $('sceneUp').checked; SC.shots = []; SC.sent = 0; SC.failed = 0; SC.q = Promise.resolve(); SC.session = 's' + Date.now().toString(36);
   // procesar cada fotograma de la cámara al llegar (no una vez por refresco de pantalla)
   const v = S.video;
   SC.vfc = !!(v && v.requestVideoFrameCallback);
