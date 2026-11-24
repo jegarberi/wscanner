@@ -1,0 +1,16 @@
+services:
+  scanner3d:
+    build: .
+    image: scanner3d:latest
+    container_name: scanner3d
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+      - "${HTTPS_PORT:-8443}:443"
+    environment:
+      # IP de este equipo en tu red local, para incluirla en el certificado (opcional)
+      SERVER_IP: ${SERVER_IP:-}
+      SERVER_NAME: ${SERVER_NAME:-scanner3d.local}
+    volumes:
+      # Certificados persistentes. Pon aquí cert.pem y key.pem propios si los tienes.
+      - ./certs:/etc/nginx/certs
