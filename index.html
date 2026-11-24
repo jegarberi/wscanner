@@ -71,6 +71,7 @@ progress{width:100%}
     <h2><b>E</b>Escena grande (coche, interior)</h2>
     <label>Focal (fracción del ancho) <input type="number" id="sceneF" value="0.8" step="0.05" min="0.4" max="2"></label>
     <label>Longitud de cada paso (m) <input type="number" id="sceneStep" value="0.5" step="0.1" min="0.05"></label>
+    <label><input type="checkbox" id="sceneTri" checked> Mostrar triángulos sobre la cámara</label>
     <label>Puntos seguidos por fotograma clave <input type="number" id="sceneN" value="200" step="20" min="20" max="1000"></label>
     <div class="row"><button id="btnScene">Iniciar escaneo</button><button id="btnScenePly" class="sec" disabled>Exportar nube (PLY)</button></div>
     <p class="hint" id="sceneInfo">Activa cámara y sensores. Camina despacio apuntando siempre al mismo lado; la escala depende de «Longitud de cada paso», así que ajústala con una medida real.</p>
@@ -273,7 +274,7 @@ async function startCam() {
   try {
     const id = $('camSel').value;
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 640 }, height: { ideal: 480 }, deviceId: id ? { exact: id } : undefined, facingMode: id ? undefined : { ideal: 'environment' } }, audio: false
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 }, deviceId: id ? { exact: id } : undefined, facingMode: id ? undefined : { ideal: 'environment' } }, audio: false
     });
     const v = document.createElement('video'); v.playsInline = true; v.muted = true; v.srcObject = stream;
     await v.play();
@@ -489,7 +490,7 @@ function drawPreview() {
   if (!el) return;
   if (S.source === 'demo' && !S.autoRun && !S.busy) S.demo.render();
   pctx.drawImage(el, 0, 0, CW, CH);
-  if (isScene()) { sceneStep(); drawSceneOverlay(); return; }
+  if (isScene()) { if (!SC.vfc) sceneStep(); drawSceneOverlay(); return; } // sin rVFC: se procesa aquí
   if ($('showMask').checked && !S.busy) {
     gctx.drawImage(el, 0, 0, CW, CH);
     const m = computeMask(downsample(), bgFor());
@@ -1161,7 +1162,7 @@ $('btnPng').onclick = async () => download(await texBlob(), 'scan_texture.png');
 // seguidos con Lucas-Kanade piramidal entre fotogramas clave; la dirección de cada paso sale de la
 // restricción epipolar (lineal, con rotación conocida). Escala = «Longitud de cada paso» (dato del usuario).
 const isScene = () => $('scanMode').value === 'scene';
-const SC = { on: false, kfs: [], pts: [], good: [], f: 0.8 * 320, step: 0.5, nFeat: 200 };
+const SC = { on: false, kfs: [], pts: [], good: [], tris: [], curImg: null, f: 0.8 * 320, step: 0.5, nFeat: 200, vfc: false, cnt: 0, t0: 0, fps: 0 };
 const vAdd = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const vSub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const vScl = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
@@ -1290,7 +1291,37 @@ function colorAt(img, p) {
   return [d[i], d[i + 1], d[i + 2]];
 }
 function sceneInfo() {
-  $('sceneInfo').textContent = `Fotogramas clave: ${SC.kfs.length} · puntos 3D: ${SC.pts.length} · seguidos ahora: ${SC.good.length}`;
+  $('sceneInfo').textContent = `Fotogramas clave: ${SC.kfs.length} · puntos 3D: ${SC.pts.length} · seguidos ahora: ${SC.good.length} · ${SC.fps} fps`;
+}
+// Delaunay (Bowyer-Watson, O(n²), n ≤ 1000): devuelve triángulos [i,j,k] sobre P
+function delaunay(P) {
+  const n = P.length; if (n < 3) return [];
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const p of P) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  const dm = Math.max(x1 - x0, y1 - y0) * 20 + 1, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const V = P.map(p => [p.x, p.y]).concat([[cx - dm, cy - dm], [cx + dm, cy - dm], [cx, cy + dm]]);
+  const inCirc = (t, px, py) => {
+    const [ax, ay] = V[t[0]], [bx, by] = V[t[1]], [qx, qy] = V[t[2]];
+    const d = 2 * (ax * (by - qy) + bx * (qy - ay) + qx * (ay - by)); if (Math.abs(d) < 1e-12) return false;
+    const a2 = ax * ax + ay * ay, b2 = bx * bx + by * by, c2 = qx * qx + qy * qy;
+    const ux = (a2 * (by - qy) + b2 * (qy - ay) + c2 * (ay - by)) / d, uy = (a2 * (qx - bx) + b2 * (ax - qx) + c2 * (bx - ax)) / d;
+    return (px - ux) ** 2 + (py - uy) ** 2 < (ax - ux) ** 2 + (ay - uy) ** 2;
+  };
+  let T = [[n, n + 1, n + 2]];
+  for (let i = 0; i < n; i++) {
+    const bad = [], keep = [];
+    for (const t of T) (inCirc(t, V[i][0], V[i][1]) ? bad : keep).push(t);
+    const edges = new Map();
+    for (const t of bad) for (const [a, b] of [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]]) {
+      const k = a < b ? a * 2048 + b : b * 2048 + a; edges.set(k, (edges.get(k) || 0) + 1);
+    }
+    for (const t of bad) for (const [a, b] of [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]]) {
+      const k = a < b ? a * 2048 + b : b * 2048 + a;
+      if (edges.get(k) === 1) keep.push([a, b, i]);
+    }
+    T = keep;
+  }
+  return T.filter(t => t[0] < n && t[1] < n && t[2] < n);
 }
 function addKeyframe(pairs, R, pyr, img) {
   const a = SC.kfs[SC.kfs.length - 1];
@@ -1321,17 +1352,32 @@ function sceneStep() {
   const R = rawBasis(); if (!R) return;
   gctx.drawImage(sourceEl(), 0, 0, CW, CH);
   const img = downsample(), pyr = pyramid(toGray(img));
+  SC.curImg = img;
+  const now = performance.now(); SC.cnt++;
+  if (now - SC.t0 >= 1000) { SC.fps = Math.round(SC.cnt * 1000 / (now - SC.t0)); SC.cnt = 0; SC.t0 = now; }
   const last = SC.kfs[SC.kfs.length - 1];
-  if (!last) { addKeyframe([], R, pyr, img); SC.good = []; return; }
+  if (!last) { addKeyframe([], R, pyr, img); SC.good = []; SC.tris = []; return; }
   const pairs = [];
   last.feats.forEach(f => { const b = trackPoint(last.pyr, pyr, f.x, f.y); if (b) pairs.push({ a: f, b }); });
   SC.good = pairs;
+  SC.tris = pairs.length >= 3 ? delaunay(pairs.map(p => p.b)) : [];
   if (pairs.length < 8) { addKeyframe([], R, pyr, img); return; } // perdido: nuevo punto de referencia sin enlace
   const d = pairs.map(p => Math.hypot(p.b.x - p.a.x, p.b.y - p.a.y)).sort((x, y) => x - y);
   if (d[d.length >> 1] > 0.05 * MW) addKeyframe(pairs, R, pyr, img); // suficiente paralaje
 }
 function drawSceneOverlay() {
-  const k = CW / MW;
+  const k = CW / MW, P = SC.good.map(p => p.b);
+  if ($('sceneTri').checked && SC.tris.length) {
+    // triángulos translúcidos: relleno con el color medio de la imagen en el centroide, borde blanco fino
+    pctx.lineWidth = 1;
+    for (const [i, j, l] of SC.tris) {
+      const a = P[i], b = P[j], c = P[l];
+      const col = colorAt(SC.curImg, { x: (a.x + b.x + c.x) / 3, y: (a.y + b.y + c.y) / 3 });
+      pctx.beginPath(); pctx.moveTo(a.x * k, a.y * k); pctx.lineTo(b.x * k, b.y * k); pctx.lineTo(c.x * k, c.y * k); pctx.closePath();
+      pctx.fillStyle = `rgba(${col[0]},${col[1]},${col[2]},0.35)`; pctx.fill();
+      pctx.strokeStyle = 'rgba(255,255,255,0.45)'; pctx.stroke();
+    }
+  }
   pctx.fillStyle = '#22c55e';
   for (const p of SC.good) pctx.fillRect(p.b.x * k - 2, p.b.y * k - 2, 4, 4);
   if (SC.on) {
@@ -1367,7 +1413,12 @@ $('btnScene').onclick = () => {
   if (!SENS.o) return status('Activa los sensores primero (orientación).');
   SC.f = (+$('sceneF').value || 0.8) * MW; SC.step = +$('sceneStep').value || 0.5;
   SC.nFeat = Math.min(1000, Math.max(20, +$('sceneN').value | 0 || 200));
-  SC.kfs = []; SC.pts = []; SC.good = []; SC.on = true;
+  SC.kfs = []; SC.pts = []; SC.good = []; SC.tris = []; SC.on = true;
+  SC.cnt = 0; SC.t0 = performance.now(); SC.fps = 0;
+  // procesar cada fotograma de la cámara al llegar (no una vez por refresco de pantalla)
+  const v = S.video;
+  SC.vfc = !!(v && v.requestVideoFrameCallback);
+  if (SC.vfc) { const cb = () => { if (!SC.on) { SC.vfc = false; return; } sceneStep(); v.requestVideoFrameCallback(cb); }; v.requestVideoFrameCallback(cb); }
   $('btnScene').textContent = 'Detener y ver nube'; sceneInfo();
 };
 $('btnScenePly').onclick = exportPly;
