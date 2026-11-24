@@ -20,6 +20,8 @@ services:
     container_name: scanner3d-uploads
     restart: unless-stopped
     command: ["python", "/app/server.py"]
+    # GPU del host (RTX 3090). Requiere NVIDIA Container Toolkit instalado en el host.
+    gpus: all
     environment:
       DATA_DIR: /data
     volumes:
