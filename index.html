@@ -1418,14 +1418,17 @@ function shotKeyframe(c, R) {
   const cv = document.createElement('canvas'); cv.width = v.videoWidth; cv.height = v.videoHeight;
   cv.getContext('2d').drawImage(v, 0, 0);
   const name = `f${String(SC.shots.length).padStart(4, '0')}.jpg`;
-  SC.shots.push({ name, c: c.slice(), R: R.map(r => Array.from(r)) });
+  SC.shots.push({ name, c: c.slice(), r: R.r.slice(), u: R.u.slice(), d: R.d.slice() }); // ejes mundiales: r derecha, u arriba, d hacia atrás (la cámara mira a -d)
   upFile(name, new Promise(res => cv.toBlob(res, 'image/jpeg', 0.92)));
 }
 // manifest.json: poses de cada fotograma y distancia focal en píxeles de la resolución completa
 function uploadManifest() {
   const v = sourceEl();
   if (!SC.up || !SC.shots.length || !v || !v.videoWidth) return;
-  const m = { w: v.videoWidth, h: v.videoHeight, focal: SC.f * v.videoWidth / MW, frames: SC.shots };
+  // puntos 3D triangulados como inicialización [x,y,z,r,g,b] (muestreados para no pasar de 8 MB)
+  const step = Math.max(1, Math.ceil(SC.pts.length / 50000));
+  const pts = SC.pts.filter((_, i) => i % step === 0).map(p => [...p.X.map(x => +x.toFixed(4)), ...p.c]);
+  const m = { w: v.videoWidth, h: v.videoHeight, focal: SC.f * v.videoWidth / MW, frames: SC.shots, points: pts };
   upFile('manifest.json', Promise.resolve(new Blob([JSON.stringify(m)], { type: 'application/json' })));
 }
 function sceneStep() {

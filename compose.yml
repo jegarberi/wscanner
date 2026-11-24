@@ -20,11 +20,22 @@ services:
     container_name: scanner3d-uploads
     restart: unless-stopped
     command: ["python", "/app/server.py"]
-    # GPU del host (RTX 3090). Requiere NVIDIA Container Toolkit instalado en el host.
-    gpus: all
     environment:
       DATA_DIR: /data
     volumes:
       - ./uploads:/app:ro
       # Fotogramas subidos desde el celular (una carpeta por sesión)
+      - ./captures:/data
+
+  trainer:
+    build: ./trainer
+    image: scanner3d-trainer:latest
+    container_name: scanner3d-trainer
+    restart: unless-stopped
+    # GPU del host (RTX 3090). Requiere NVIDIA Container Toolkit instalado en el host.
+    gpus: all
+    environment:
+      ITERS: ${ITERS:-3000}
+    volumes:
+      # Lee manifest.json y fotogramas de cada sesión y escribe splat.ply junto a ellos
       - ./captures:/data
