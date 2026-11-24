@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install torch==2.4.1 --index-url https://download.pytorch.org/whl/cu124 \
-    && pip3 install gsplat==1.5.3 pillow numpy
+    && pip3 install gsplat==1.5.3 pillow numpy packaging
 
 COPY train.py /app/train.py
 WORKDIR /app
