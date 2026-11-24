@@ -70,7 +70,7 @@ progress{width:100%}
   <div class="panel" id="scenePanel" style="display:none">
     <h2><b>E</b>Escena grande (coche, interior)</h2>
     <label>Focal (fracción del ancho) <input type="number" id="sceneF" value="0.8" step="0.05" min="0.4" max="2"></label>
-    <label>Longitud de cada paso (m) <input type="number" id="sceneStep" value="0.5" step="0.1" min="0.05"></label>
+    <label>Paso fijo si no hay acelerómetro (m) <input type="number" id="sceneStep" value="0.5" step="0.1" min="0.05"></label>
     <label><input type="checkbox" id="sceneTri" checked> Mostrar triángulos sobre la cámara</label>
     <label>Puntos seguidos por fotograma clave <input type="number" id="sceneN" value="200" step="20" min="20" max="1000"></label>
     <div class="row"><button id="btnScene">Iniciar escaneo</button><button id="btnScenePly" class="sec" disabled>Exportar nube (PLY)</button></div>
@@ -242,6 +242,7 @@ async function enableSensors() {
   } catch (e) { $('sensorInfo').textContent = 'Sensores no disponibles: ' + e.message; return; }
   window.addEventListener('deviceorientation', e => { if (e.alpha != null) SENS.o = { alpha: e.alpha, beta: e.beta, gamma: e.gamma }; });
   window.addEventListener('devicemotion', e => {
+    imuUpdate(e);
     const a = e.accelerationIncludingGravity; if (a) SENS.acc = [a.x, a.y, a.z];
     const r = e.rotationRate; if (!r || r.alpha == null) return;
     SENS.rr = [r.alpha, r.beta, r.gamma];
@@ -1162,7 +1163,7 @@ $('btnPng').onclick = async () => download(await texBlob(), 'scan_texture.png');
 // seguidos con Lucas-Kanade piramidal entre fotogramas clave; la dirección de cada paso sale de la
 // restricción epipolar (lineal, con rotación conocida). Escala = «Longitud de cada paso» (dato del usuario).
 const isScene = () => $('scanMode').value === 'scene';
-const SC = { on: false, kfs: [], pts: [], good: [], tris: [], curImg: null, f: 0.8 * 320, step: 0.5, nFeat: 200, vfc: false, cnt: 0, t0: 0, fps: 0 };
+const SC = { on: false, kfs: [], pts: [], good: [], tris: [], curImg: null, f: 0.8 * 320, step: 0.5, nFeat: 200, vfc: false, cnt: 0, t0: 0, fps: 0, pKf: [0, 0, 0] };
 const vAdd = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const vSub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const vScl = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
@@ -1286,12 +1287,67 @@ function triangulate(ca, ra, cb, rb) {
   if (lam <= 0 || mu <= 0) return null;
   return vScl(vAdd(vAdd(ca, vScl(ra, lam)), vAdd(cb, vScl(rb, mu))), 0.5);
 }
+// ---------------------------------------------------------------- IMU: giroscopio (rotación) + acelerómetro (desplazamiento)
+// Rotación: integración de rotationRate (ejes del dispositivo) con corrección lenta hacia la orientación absoluta (deriva de yaw).
+// Desplazamiento: acelerómetro sin gravedad → velocidad → posición; velocidad a cero cuando el móvil está quieto (ZUPT).
+const IMU = { R: null, p: [0, 0, 0], v: [0, 0, 0], t: null, still: 0, moving: false, n: 0 };
+const I3 = [[1, 0, 0], [0, 1, 0], [0, 0, 1]], D2R = Math.PI / 180, GRAV = 9.81;
+function matMul(A, B) { return A.map(row => [0, 1, 2].map(j => row[0] * B[0][j] + row[1] * B[1][j] + row[2] * B[2][j])); }
+function rotVec(w, dt) { // rotación de |w|·dt alrededor del eje w (Rodrigues)
+  const wn = Math.hypot(...w); if (wn * dt < 1e-12) return I3;
+  const [kx, ky, kz] = w.map(x => x / wn), th = wn * dt, s = Math.sin(th), c = Math.cos(th), t = 1 - c;
+  return [[c + kx * kx * t, kx * ky * t - kz * s, kx * kz * t + ky * s], [ky * kx * t + kz * s, c + ky * ky * t, ky * kz * t - kx * s], [kz * kx * t - ky * s, kz * ky * t + kx * s, c + kz * kz * t]];
+}
+function orthonormal(M) { // Gram-Schmidt sobre las columnas (ejes del dispositivo en coordenadas de la Tierra)
+  const col = c => [M[0][c], M[1][c], M[2][c]];
+  const a = vNorm(col(0)), b = vNorm(vSub(col(1), vScl(a, vDot(a, col(1))))), c = vCrs(a, b);
+  return [[a[0], b[0], c[0]], [a[1], b[1], c[1]], [a[2], b[2], c[2]]];
+}
+function basisFromM(M, screenAngle) { // base de la cámara trasera (r,u,d) desde la matriz dispositivo→Tierra
+  const sa = (screenAngle || 0) * D2R;
+  return {
+    r: earthToObj(mulV(M, [Math.cos(sa), -Math.sin(sa), 0])),
+    u: earthToObj(mulV(M, [Math.sin(sa), Math.cos(sa), 0])),
+    d: earthToObj(mulV(M, [0, 0, -1])).map(x => -x)
+  };
+}
+function imuUpdate(e, now = performance.now() / 1000) {
+  const dt = IMU.t == null ? 0 : Math.min(0.1, now - IMU.t); IMU.t = now;
+  if (!IMU.R) { if (!SENS.o) return; IMU.R = deviceMatrix(SENS.o.alpha * D2R, SENS.o.beta * D2R, SENS.o.gamma * D2R); }
+  const r = e.rotationRate, w = r && r.alpha != null ? [r.beta, r.gamma, r.alpha].map(x => x * D2R) : [0, 0, 0];
+  if (dt > 0) IMU.R = orthonormal(matMul(IMU.R, rotVec(w, dt)));
+  if (SENS.o) { // corrección lenta hacia la orientación absoluta
+    const A = deviceMatrix(SENS.o.alpha * D2R, SENS.o.beta * D2R, SENS.o.gamma * D2R);
+    IMU.R = orthonormal(IMU.R.map((row, i) => row.map((x, j) => x + 0.005 * (A[i][j] - x))));
+  }
+  const a = e.acceleration, ag = e.accelerationIncludingGravity;
+  let lin;
+  if (a && a.x != null) lin = [a.x, a.y, a.z];
+  else if (ag && ag.x != null) { const g = [0, 1, 2].map(i => IMU.R[2][i] * GRAV); lin = [ag.x - g[0], ag.y - g[1], ag.z - g[2]]; }
+  else return;
+  IMU.n++;
+  const still = Math.hypot(...lin) < 0.25 && Math.hypot(...w) < 0.1;
+  IMU.still = still ? IMU.still + dt : 0;
+  IMU.moving = IMU.still < 0.15;
+  if (still) IMU.v = [0, 0, 0]; // ZUPT: quieto ahora mismo → sin velocidad, sin deriva
+  else if (dt > 0) {
+    const aw = earthToObj(mulV(IMU.R, lin));
+    IMU.v = vAdd(IMU.v, vScl(aw, dt));
+    IMU.p = vAdd(IMU.p, vScl(IMU.v, dt));
+  }
+}
+// pose de la cámara para la escena: giroscopio si hay datos; si no, la orientación absoluta
+function scenePose() {
+  if (IMU.R && IMU.n > 0) return basisFromM(IMU.R, (screen.orientation && screen.orientation.angle) || window.orientation || 0);
+  return rawBasis();
+}
 function colorAt(img, p) {
   const i = (Math.round(p.y) * MW + Math.round(p.x)) * 4, d = img.data;
   return [d[i], d[i + 1], d[i + 2]];
 }
 function sceneInfo() {
-  $('sceneInfo').textContent = `Fotogramas clave: ${SC.kfs.length} · puntos 3D: ${SC.pts.length} · seguidos ahora: ${SC.good.length} · ${SC.fps} fps`;
+  const imu = IMU.n ? `${IMU.moving ? 'moviendo' : 'quieto'} · desde último fotograma ${Math.hypot(...vSub(IMU.p, SC.pKf)).toFixed(2)} m` : 'sin acelerómetro (paso fijo)';
+  $('sceneInfo').textContent = `Fotogramas clave: ${SC.kfs.length} · puntos 3D: ${SC.pts.length} · seguidos: ${SC.good.length} · ${SC.fps} fps · ${imu}`;
 }
 // Delaunay (Bowyer-Watson, O(n²), n ≤ 1000): devuelve triángulos [i,j,k] sobre P
 function delaunay(P) {
@@ -1326,18 +1382,21 @@ function delaunay(P) {
 function addKeyframe(pairs, R, pyr, img) {
   const a = SC.kfs[SC.kfs.length - 1];
   let c = a ? a.c : [0, 0, 0];
-  if (a && pairs.length >= 8) {
+  // distancia desde el fotograma clave anterior: acelerómetro si hay datos; si no, «Longitud de cada paso»
+  const step = IMU.n > 0 ? Math.hypot(...vSub(IMU.p, SC.pKf)) : SC.step;
+  SC.pKf = IMU.p.slice();
+  if (a && pairs.length >= 8 && step >= 0.01) {
     const ra = pairs.map(p => rayOf(a.R, p.a)), rb = pairs.map(p => rayOf(R, p.b));
-    const t = epipolarDir(ra, rb);
+    const t = epipolarDir(ra, rb); // dirección: píxeles (restricción epipolar)
     if (t) {
       // el signo de t no sale de la epipolar: elegimos el que deja más puntos delante de ambas cámaras
       let bestSign = 1, bestN = -1;
       for (const sg of [1, -1]) {
-        const cc = vAdd(a.c, vScl(t, sg * SC.step)); let n = 0;
+        const cc = vAdd(a.c, vScl(t, sg * step)); let n = 0;
         for (let i = 0; i < Math.min(pairs.length, 60); i++) if (triangulate(a.c, ra[i], cc, rb[i])) n++;
         if (n > bestN) { bestN = n; bestSign = sg; }
       }
-      c = vAdd(a.c, vScl(t, bestSign * SC.step));
+      c = vAdd(a.c, vScl(t, bestSign * step));
       for (let i = 0; i < pairs.length && SC.pts.length < 200000; i++) {
         const X = triangulate(a.c, ra[i], c, rb[i]);
         if (X) SC.pts.push({ X, c: colorAt(img, pairs[i].b) });
@@ -1349,12 +1408,12 @@ function addKeyframe(pairs, R, pyr, img) {
 }
 function sceneStep() {
   if (!SC.on || S.source !== 'cam' || S.busy) return;
-  const R = rawBasis(); if (!R) return;
+  const R = scenePose(); if (!R) return;
   gctx.drawImage(sourceEl(), 0, 0, CW, CH);
   const img = downsample(), pyr = pyramid(toGray(img));
   SC.curImg = img;
   const now = performance.now(); SC.cnt++;
-  if (now - SC.t0 >= 1000) { SC.fps = Math.round(SC.cnt * 1000 / (now - SC.t0)); SC.cnt = 0; SC.t0 = now; }
+  if (now - SC.t0 >= 1000) { SC.fps = Math.round(SC.cnt * 1000 / (now - SC.t0)); SC.cnt = 0; SC.t0 = now; sceneInfo(); }
   const last = SC.kfs[SC.kfs.length - 1];
   if (!last) { addKeyframe([], R, pyr, img); SC.good = []; SC.tris = []; return; }
   const pairs = [];
@@ -1414,6 +1473,7 @@ $('btnScene').onclick = () => {
   SC.f = (+$('sceneF').value || 0.8) * MW; SC.step = +$('sceneStep').value || 0.5;
   SC.nFeat = Math.min(1000, Math.max(20, +$('sceneN').value | 0 || 200));
   SC.kfs = []; SC.pts = []; SC.good = []; SC.tris = []; SC.on = true;
+  IMU.p = [0, 0, 0]; IMU.v = [0, 0, 0]; IMU.t = null; IMU.n = 0; IMU.R = null; SC.pKf = [0, 0, 0];
   SC.cnt = 0; SC.t0 = performance.now(); SC.fps = 0;
   // procesar cada fotograma de la cámara al llegar (no una vez por refresco de pantalla)
   const v = S.video;
