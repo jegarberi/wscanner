@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Visor 3D splat</title>
+<style>
+:root { --bg: #0f1115; --fg: #e8eaed; --muted: #9aa0a6; }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg: #f6f7f9; --fg: #111418; --muted: #5f6368; } }
+:root[data-theme="light"] { --bg: #f6f7f9; --fg: #111418; --muted: #5f6368; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 10px 16px; height: 28px; }
+header a { color: inherit; }
+#v { position: fixed; top: 48px; right: 0; bottom: 0; left: 0; }
+#msg { padding: 16px; color: var(--muted); }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<header>
+  <a href="./">← Escáner</a>
+  <span id="name"></span>
+  <a id="dl" href="#" download>Descargar splat.ply</a>
+</header>
+<div id="v"></div>
+<div id="msg"></div>
+<script type="module">
+// Visor de splats 3D: @mkkellogg/gaussian-splats-3d (MIT). Sin SharedArrayBuffer: el servidor no envía cabeceras COOP/COEP.
+import * as GS from 'https://unpkg.com/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js';
+
+const $ = id => document.getElementById(id);
+const s = new URLSearchParams(location.search).get('s') || '';
+if (!/^[A-Za-z0-9_-]{1,40}$/.test(s)) {
+  $('msg').textContent = 'Falta la sesión. Usa viewer.html?s=<sesión> o elígela desde el escáner.';
+} else {
+  const url = `captures/${s}/splat.ply`;
+  $('name').textContent = s;
+  $('dl').href = url;
+  $('dl').download = `${s}.ply`;
+  const viewer = new GS.Viewer({ rootElement: $('v'), sharedMemoryForWorkers: false });
+  viewer.addSplatScene(url, { showLoadingUI: true })
+    .catch(e => { $('msg').textContent = 'No se pudo cargar el modelo: ' + e.message; });
+}
+</script>
+</body>
+</html>

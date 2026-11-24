@@ -12,6 +12,8 @@ services:
       SERVER_IP: ${SERVER_IP:-}
       SERVER_NAME: ${SERVER_NAME:-scanner3d.local}
     volumes:
+      # Modelos entrenados (solo lectura): el escáner los lista y ofrece splat.ply
+      - ./captures:/usr/share/nginx/html/captures:ro
       # Certificados persistentes. Pon aquí cert.pem y key.pem propios si los tienes.
       - ./certs:/etc/nginx/certs
 

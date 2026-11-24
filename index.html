@@ -75,6 +75,9 @@ progress{width:100%}
     <label><input type="checkbox" id="sceneUp" checked> Subir fotogramas clave al servidor (resolución completa + poses)</label>
     <label>Puntos seguidos por fotograma clave <input type="number" id="sceneN" value="500" step="50" min="20" max="3000"></label>
     <div class="row"><button id="btnScene">Iniciar escaneo</button><button id="btnScenePly" class="sec" disabled>Exportar nube (PLY)</button></div>
+    <h2><b>F</b>Modelos entrenados</h2>
+    <div class="row"><button id="btnModels" class="sec">Actualizar lista</button></div>
+    <p class="hint" id="modelList">Pulsa «Actualizar lista» para ver los modelos entrenados.</p>
     <p class="hint" id="sceneInfo">Activa cámara y sensores. Camina despacio apuntando siempre al mismo lado; la escala depende de «Longitud de cada paso», así que ajústala con una medida real.</p>
   </div>
 
@@ -1508,6 +1511,27 @@ $('btnScene').onclick = () => {
   $('btnScene').textContent = 'Detener y ver nube'; sceneInfo();
 };
 $('btnScenePly').onclick = exportPly;
+// Modelos entrenados: lista las sesiones de captures/ que ya tienen splat.ply
+async function refreshModels() {
+  const box = $('modelList'); box.textContent = 'Buscando…';
+  try {
+    const entries = await (await fetch('captures/', { cache: 'no-store' })).json();
+    const found = [];
+    for (const e of entries.filter(x => x.type === 'directory')) {
+      const r = await fetch(`captures/${e.name}/splat.ply`, { method: 'HEAD', cache: 'no-store' });
+      if (r.ok) found.push(e.name);
+    }
+    box.textContent = '';
+    if (!found.length) { box.textContent = 'Todavía no hay modelos entrenados.'; return; }
+    for (const s of found) {
+      const p = document.createElement('p'); p.className = 'hint';
+      const a = document.createElement('a'); a.href = `viewer.html?s=${encodeURIComponent(s)}`; a.textContent = s;
+      const d = document.createElement('a'); d.href = `captures/${encodeURIComponent(s)}/splat.ply`; d.download = `${s}.ply`; d.textContent = ' · descargar splat.ply';
+      p.append(a, d); box.append(p);
+    }
+  } catch (e) { box.textContent = 'No se pudo leer la lista: ' + e.message; }
+}
+$('btnModels').onclick = refreshModels;
 
 // ---------------------------------------------------------------- eventos
 $('btnCam').onclick = startCam;
