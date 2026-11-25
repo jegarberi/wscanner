@@ -25,23 +25,70 @@ header a { color: inherit; }
   <a id="dl" href="#" download>Descargar splat.ply</a>
 </header>
 <div id="v"></div>
-<div id="msg"></div>
+<div id="msg">Cargando…</div>
 <script type="module">
 // Visor de splats 3D: @mkkellogg/gaussian-splats-3d (MIT). Sin SharedArrayBuffer: el servidor no envía cabeceras COOP/COEP.
-import * as GS from 'https://unpkg.com/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js';
-
 const $ = id => document.getElementById(id);
+const say = t => { $('msg').textContent = t; };
 const s = new URLSearchParams(location.search).get('s') || '';
+
+async function frame(url) {
+  // encuadra la cámara en el modelo: lee solo x,y,z de cada vértice del .ply (binario little-endian)
+  const buf = await (await fetch(url)).arrayBuffer();
+  const head = new TextDecoder().decode(new Uint8Array(buf, 0, Math.min(buf.byteLength, 4096)));
+  const end = head.indexOf('end_header\n') + 'end_header\n'.length;
+  const n = +head.match(/element vertex (\d+)/)[1];
+  const names = [...head.slice(0, end).matchAll(/property float (\w+)/g)].map(m => m[1]);
+  const stride = names.length * 4, dv = new DataView(buf, end);
+  const ix = ['x', 'y', 'z'].map(k => names.indexOf(k) * 4);
+  const io = names.indexOf('opacity') * 4, is = ['scale_0', 'scale_1', 'scale_2'].map(k => names.indexOf(k) * 4);
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  // splat «visible»: el más opaco y grande (opacidad × volumen); el visor apunta a él
+  let best = -1, target = null;
+  for (let i = 0; i < n; i++) {
+    const o = i * stride, p = ix.map(j => dv.getFloat32(o + j, true));
+    for (let k = 0; k < 3; k++) { if (p[k] < lo[k]) lo[k] = p[k]; if (p[k] > hi[k]) hi[k] = p[k]; }
+    const alpha = 1 / (1 + Math.exp(-dv.getFloat32(o + io, true)));
+    const vol = Math.exp(is.reduce((a, j) => a + dv.getFloat32(o + j, true), 0));
+    const score = alpha * vol;
+    if (score > best) { best = score; target = p; }
+  }
+  const c = lo.map((v, k) => (v + hi[k]) / 2);
+  const r = Math.max(...hi.map((v, k) => v - lo[k])) / 2 || 1;
+  return { n, c, r, target };
+}
+
 if (!/^[A-Za-z0-9_-]{1,40}$/.test(s)) {
-  $('msg').textContent = 'Falta la sesión. Usa viewer.html?s=<sesión> o elígela desde el escáner.';
+  say('Falta la sesión. Usa viewer.html?s=<sesión> o elígela desde el escáner.');
 } else {
   const url = `captures/${s}/splat.ply`;
   $('name').textContent = s;
   $('dl').href = url;
   $('dl').download = `${s}.ply`;
-  const viewer = new GS.Viewer({ rootElement: $('v'), sharedMemoryForWorkers: false });
-  viewer.addSplatScene(url, { showLoadingUI: true })
-    .catch(e => { $('msg').textContent = 'No se pudo cargar el modelo: ' + e.message; });
+  say('Cargando visor…');
+  let GS = null;
+  try {
+    GS = await import('https://unpkg.com/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js');
+  } catch (e) {
+    say('No se pudo cargar el visor desde unpkg.com (¿bloqueado en tu red?). Detalle: ' + e.message);
+  }
+  if (GS) {
+    try {
+      say('Leyendo el modelo…');
+      const { n, c, r, target } = await frame(url);
+      const focus = target || c;
+      say(`Modelo: ${n} splats. Procesando…`);
+      const viewer = new GS.Viewer({
+        rootElement: $('v'), sharedMemoryForWorkers: false,
+        initialCameraPosition: [focus[0], focus[1], focus[2] + 1.5 * r],
+        initialCameraLookAt: focus,
+      });
+      await viewer.addSplatScene(url, { showLoadingUI: true });
+      say(`Modelo listo: ${n} splats. Si no ves nada, prueba a girar o hacer zoom con el dedo o el ratón.`);
+    } catch (e) {
+      say('No se pudo cargar el modelo: ' + e.message);
+    }
+  }
 }
 </script>
 </body>

@@ -105,6 +105,10 @@ def train_session(folder):
         opt.step()
         if it % 500 == 0 or it == ITERS - 1:
             print(f"{os.path.basename(folder)} it {it}/{ITERS} L1 {loss.item():.4f} gaussianas {len(p['mu'])}", flush=True)
+    # poda: las gaussianas casi transparentes se quitan antes de exportar (si no, el visor se queda en «Processing splats»)
+    keep = torch.sigmoid(p["o"].detach()) >= 0.01
+    p = {k: v.detach()[keep] for k, v in p.items()}
+    print(f"{os.path.basename(folder)}: gaussianas tras la poda {int(keep.sum())}", flush=True)
     save_ply(os.path.join(folder, "splat.ply"), p)
     print(f"{os.path.basename(folder)}: listo en {time.time() - t0:.0f} s", flush=True)
 
